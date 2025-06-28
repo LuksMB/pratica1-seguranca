@@ -1,8 +1,9 @@
-import secrets, requests
+import secrets, requests, time
 from nacl.signing import SigningKey as sk
-from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives import serialization, hashes, padding
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import time
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.hmac import HMAC
 
 # Função auxiliar para carregar a chave privada openssh e convertê-la para bytes
 def load_private_key_bytes(key):
@@ -63,11 +64,11 @@ def download_github_public_keys(username, retries=3, delay=2):
                 return chaves
             else:
                 raise requests.HTTPError(f"Erro ao buscar chaves para o usuário {username}. Status: {response.status_code}")
-        except Exception as e:
+        except Exception:
             if attempt < retries - 1:
                 time.sleep(delay)
             else:
-                raise requests.HTTPError(f"Erro ao buscar chaves para o usuário {username}.")
+                raise requests.HTTPError(f"Não foi possível concluir o download das chaves para o usuário {username}. Tente novamente mais tarde.")
 
 # Função auxiliar para verificar a assinatura usando as chaves públicas
 def verify_signature(chaves, dh_public_key, signature, username):
@@ -96,3 +97,41 @@ def derive_keys_aes_hmac(password, salt):
     key_aes = derived_key[:32]
     key_hmac = derived_key[32:]
     return key_aes, key_hmac
+
+# Função auxiliar para cifrar uma mensagem usando AES em modo CBC
+def encrypt_message(message, key_aes, iv_cbc):
+    # Verifica se a chave AES tem o tamanho correto (32 bytes para AES-256)
+    if len(key_aes) != 32:
+        raise ValueError("A chave AES deve ter 32 bytes para AES-256.")
+
+    # Cria um padder para adicionar padding à mensagem
+    padder = padding.PKCS7(128).padder()  # 128 bits = bloco AES
+    padded_message = padder.update(message.encode("utf-8")) + padder.finalize()
+
+    # Cria um encryptor para cifrar a mensagem
+    cipher = Cipher(algorithms.AES(key_aes), modes.CBC(iv_cbc))
+    encryptor = cipher.encryptor()
+
+    return encryptor.update(padded_message) + encryptor.finalize()
+
+def decrypt_message(encrypted_message, key_aes, iv_cbc):    
+    # Verifica se a chave AES tem o tamanho correto (32 bytes para AES-256)
+    if len(key_aes) != 32:
+        raise ValueError("A chave AES deve ter 32 bytes para AES-256.")
+
+    # Cria um decryptor para decifrar a mensagem
+    cipher = Cipher(algorithms.AES(key_aes), modes.CBC(iv_cbc))
+    decryptor = cipher.decryptor()
+
+    padded_message = decryptor.update(encrypted_message) + decryptor.finalize()
+
+    # Remove o padding da mensagem
+    unpadder = padding.PKCS7(128).unpadder()
+    message = unpadder.update(padded_message) + unpadder.finalize()
+
+    return message.decode("utf-8")
+
+def calcular_hmac(key_hmac, iv, mensagem_cifrada):
+    hmac = HMAC(key_hmac, hashes.SHA256())
+    hmac.update(iv + mensagem_cifrada)
+    return hmac.finalize()

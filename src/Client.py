@@ -1,6 +1,7 @@
 import socket, os
 from dotenv import load_dotenv
-from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, download_github_public_keys, verify_signature, derive_keys_aes_hmac
+from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, download_github_public_keys, verify_signature, derive_keys_aes_hmac, encrypt_message, calcular_hmac
+
 
 # Carregando as variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -23,7 +24,7 @@ a, A = generate_dh_keypair(DH_G, DH_P)
 salt = os.urandom(16)
 
 # Gera um vetor de inicialização (IV) aleatório para o modo CBC do AES
-iv_cbc = os.urandom(16)
+iv_aes = os.urandom(16)
 
 # A seguir, será feita a assinatura EdRSA da chave pública A do cliente e do seu nome de usuário.
 private_key_bytes = load_private_key_bytes(ENV_PRIVATE_KEY) # Carrega a chave privada a partir do arquivo .env em bytes
@@ -56,11 +57,29 @@ try:
 
         # Derivando as chaves AES e HMAC
         key_aes, key_hmac = derive_keys_aes_hmac(DH_SECRET_KEY.to_bytes(2048, byteorder="big"), salt)
-        print(f"AES Key: {key_aes.hex()}")
-        print(f"HMAC Key: {key_hmac.hex()}")
 
         # Mensagem clara para ser cifrada
         mensagem_clara = "Eu contei uma piada sobre construção... mas ainda estou trabalhando no final!"
+
+        # Cifrando a mensagem clara
+        mensagem_cifrada = encrypt_message(mensagem_clara, key_aes, iv_aes)
+
+        # Calculando o HMAC da IV_AES + MENSAGEM_CRIPTOGRAFADA usando Key_HMAC
+        hmac_tag = calcular_hmac(key_hmac, iv_aes, mensagem_cifrada)
+
+        # Empacotando o hmac_tag a mensagem cifrada, o IV e o  em um pacote
+        pacote = hmac_tag + iv_aes + mensagem_cifrada
+
+        # Enviando a mensagem cifrada para o servidor
+        client_socket.sendall(pacote)
+
+        # Recebendo a confirmação do servidor
+        resposta = client_socket.recv(1024)
+
+        if resposta:
+            print(f"Servidor: {resposta.decode('utf-8')}")
+        else:
+            print("Nenhuma confirmação recebida do servidor.")
 
 except Exception as e:
     print(f"Ocorreu um erro durante a comunicação com o servidor: {e}")

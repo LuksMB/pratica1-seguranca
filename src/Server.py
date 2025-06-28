@@ -1,6 +1,6 @@
 import socket, os
 from dotenv import load_dotenv
-from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, download_github_public_keys, verify_signature, derive_keys_aes_hmac
+from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, download_github_public_keys, verify_signature, derive_keys_aes_hmac, calcular_hmac, decrypt_message
 
 load_dotenv()
 
@@ -30,14 +30,40 @@ def handle_client(conn, addr):
             else:
                 print(f"Assinatura inválida para o usuário {client_username}.")
                 break
-            b, B = generate_dh_keypair(DH_G, DH_P)
-            private_key_bytes = load_private_key_bytes(ENV_PRIVATE_KEY)
-            signed_message = create_signed_message(B, private_key_bytes, GITHUB_USERNAME, salt)
-            conn.sendall(signed_message)
-            DH_SECRET_KEY = pow(client_dh_public_key, b, DH_P)
-            key_aes, key_hmac = derive_keys_aes_hmac(DH_SECRET_KEY.to_bytes(2048, byteorder="big"), salt)
-            print(f"AES Key: {key_aes.hex()}")
-            print(f"HMAC Key: {key_hmac.hex()}")
+
+            b, B = generate_dh_keypair(DH_G, DH_P)  # Chave privada e pública do servidor
+            private_key_bytes = load_private_key_bytes(ENV_PRIVATE_KEY) # Carrega a chave privada do servidor
+            signed_message = create_signed_message(B, private_key_bytes, GITHUB_USERNAME, salt) # Cria a mensagem assinada com a chave privada Ed25519 do servidor
+            conn.sendall(signed_message) # Envia a mensagem assinada com a chave pública B do servidor e o nome de usuário para o cliente
+            DH_SECRET_KEY = pow(client_dh_public_key, b, DH_P) # Calcula a chave secreta compartilhada (S = A^b mod p)
+            key_aes, key_hmac = derive_keys_aes_hmac(DH_SECRET_KEY.to_bytes(2048, byteorder="big"), salt) # Deriva as chaves AES e HMAC
+
+            # Recebe o pacote do cliente (hmac_tag + iv_aes + mensagem_cifrada)
+            pacote = conn.recv(2048)
+            if not pacote:
+                break
+
+            if len(pacote) < 32:
+                print("Pacote recebido é menor que 32 bytes, conexão encerrada.")
+                break
+
+            hmac_tag = pacote[:32]
+            iv_aes = pacote[32:48]
+            mensagem_cifrada = pacote[48:]
+
+            # Verifica o HMAC da mensagem recebida
+            hmac_calculado = calcular_hmac(key_hmac, iv_aes, mensagem_cifrada)
+            if hmac_calculado != hmac_tag:
+                print("HMAC inválido, conexão encerrada.")
+                break
+
+            # Descriptografa a mensagem recebida
+            mensagem_clara = decrypt_message(mensagem_cifrada, key_aes, iv_aes)
+            print(f"Mensagem recebida do cliente {client_username}: {mensagem_clara}")
+            confirmacao = "Mensagem recebida com sucesso!"
+
+            conn.sendall(confirmacao.encode("utf-8"))  # Envia uma resposta ao cliente
+
     print(f"Conexão encerrada com {addr}")
 
 try:
