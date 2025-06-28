@@ -1,6 +1,8 @@
 import secrets, requests
 from nacl.signing import SigningKey as sk
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import time
 
 # Função auxiliar para carregar a chave privada openssh e convertê-la para bytes
 def load_private_key_bytes(key):
@@ -20,7 +22,6 @@ def load_private_key_bytes(key):
 # Função auxiliar feita para converter para decimal o hexadecimal de P
 # É necessário remover todos os espaços e interpretar a string resultante como um número hexadecimal.
 def hex_to_decimal(hex_string):
-    hex_string = hex_string.replace(" ", "")
     return int(hex_string, 16)
 
 # Função para gerar o par de chaves Diffie-Hellman (chave privada e chave pública)
@@ -30,41 +31,46 @@ def generate_dh_keypair(g, p):
     return private_key, public_key
 
 # Função para criar uma mensagem assinada com a chave privada Ed25519
-def create_signed_message(dh_public_key, bytes_key, username):
+def create_signed_message(dh_public_key, bytes_key, username, salt):
     private_key = sk(bytes_key) # Carrega a chave privada Ed25519 a partir dos bytes
     message = f"{dh_public_key}:{username}".encode("utf-8") # Cria a mensagem a ser assinada
     signed = private_key.sign(message) # Assina a mensagem com a chave privada
-    signed_message = f"{dh_public_key}:{signed.signature.hex()}:{username}".encode("utf-8") # Formata a mensagem assinada como uma string codificada em bytes
+    signed_message = f"{dh_public_key}:{signed.signature.hex()}:{username}:{salt.hex()}".encode("utf-8") # Formata a mensagem assinada como uma string codificada em bytes
     return signed_message
 
 def read_signed_message(signed_message):
     # Divide a mensagem assinada em partes
     parts = signed_message.decode("utf-8").split(":")
-    
-    if len(parts) != 3:
-        raise ValueError("Mensagem assinada inválida. Deve conter três partes separadas por ':'.")
+
+    if len(parts) != 4:
+        raise ValueError("Mensagem assinada inválida.")
 
     dh_public_key = int(parts[0])  # Chave pública Diffie-Hellman como inteiro
     signature = bytes.fromhex(parts[1])  # Assinatura em formato hexadecimal
     username = parts[2]  # Nome de usuário
+    salt = bytes.fromhex(parts[3])  # Salt
 
-    return dh_public_key, signature, username
+    return dh_public_key, signature, username, salt
 
 # Função auxiliar para baixar as chaves públicas do GitHub de um usuário
-def baixar_chaves_publicas_github(username):
+def download_github_public_keys(username, retries=3, delay=2):
     url = f"https://github.com/{username}.keys"
-    response = requests.get(url)
-
-    # Verifica se a requisição foi bem-sucedida
-    if response.status_code != 200:
-        raise requests.HTTPError(f"Erro ao buscar chaves: {response.status_code}")
-    
-    # Divide por linhas e remove vazios
-    chaves = [linha.strip() for linha in response.text.strip().split("\n") if linha.strip()]
-    return chaves
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                chaves = [linha.strip() for linha in response.text.strip().split("\n") if linha.strip()]
+                return chaves
+            else:
+                raise requests.HTTPError(f"Erro ao buscar chaves para o usuário {username}. Status: {response.status_code}")
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise requests.HTTPError(f"Erro ao buscar chaves para o usuário {username}.")
 
 # Função auxiliar para verificar a assinatura usando as chaves públicas
-def verificar_assinatura(chaves, dh_public_key, signature, username):
+def verify_signature(chaves, dh_public_key, signature, username):
     for chave in chaves:
         try:
             public_key = serialization.load_ssh_public_key(chave.encode("utf-8"))
@@ -73,3 +79,20 @@ def verificar_assinatura(chaves, dh_public_key, signature, username):
         except Exception:
             continue  # Se a verificação falhar, tenta com a próxima chave
     return False
+
+# Função auxiliar para derivar uma chave secreta usando PBKDF2
+def derive_keys_aes_hmac(password, salt):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=64,
+        salt=salt,
+        iterations=500000,
+    )
+    # Deriva a chave usando PBKDF2
+    # A chave derivada será de 64 bytes, dividida em duas partes:
+    derived_key = kdf.derive(password)
+
+    # Separar as chaves
+    key_aes = derived_key[:32]
+    key_hmac = derived_key[32:]
+    return key_aes, key_hmac

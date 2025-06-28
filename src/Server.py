@@ -1,25 +1,17 @@
-import socket, secrets, os
+import socket, os
 from dotenv import load_dotenv
-from nacl.signing import SigningKey as sk
-from cryptography.hazmat.primitives import serialization
-from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, baixar_chaves_publicas_github, verificar_assinatura
+from AuxiliarFunctions import load_private_key_bytes, hex_to_decimal, generate_dh_keypair, create_signed_message, read_signed_message, download_github_public_keys, verify_signature, derive_keys_aes_hmac
 
-# Nessa primeira etapa, vamos importar as bibliotecas necessárias e carregar as variáveis de ambiente do arquivo .env.
-# Carregando as variáveis de ambiente do arquivo .env
 load_dotenv()
 
-# Definindo constantes
 HOST = 'localhost'
 PORT = 5320
-GITHUB_USERNAME = 'lucasbraga-jit'  # Substitua pelo nome de usuário do GitHub do servidor
-ENV_PRIVATE_KEY = os.getenv("PRIVATE_KEY_SERVER").encode("utf-8")  # Obtendo a chave privada Ed25519 do arquivo .env e convertendo para bytes
-DH_P_HEX = os.getenv("DH_P_HEX")  # Obtendo o valor de P em hexadecimal do arquivo .env
+GITHUB_USERNAME = 'lucasbraga-jit'
+ENV_PRIVATE_KEY = os.getenv("PRIVATE_KEY_SERVER").encode("utf-8")
+DH_P_HEX = os.getenv("DH_P_HEX")
+DH_P = hex_to_decimal(DH_P_HEX)
+DH_G = 2
 
-# Definindo os parâmetros públicos para o Diffie-Hellman usando de exemplo o grupo 2048-bit MODP do RFC 3526
-DH_P = hex_to_decimal(DH_P_HEX)  # Convertendo P para decimal
-DH_G = 2  # Gerador
-
-# Função para lidar com a conexão do cliente - Código principal do servidor
 def handle_client(conn, addr):
     print("\n---------------------------------\n")
     print(f"Conectado por {addr}")
@@ -28,46 +20,44 @@ def handle_client(conn, addr):
             dh_handshake_data = conn.recv(2048)
             if not dh_handshake_data:
                 break
-            client_dh_public_key, signature, client_username = read_signed_message(dh_handshake_data)
-
-            chaves = baixar_chaves_publicas_github(client_username)
+            client_dh_public_key, signature, client_username, salt = read_signed_message(dh_handshake_data)
+            chaves = download_github_public_keys(client_username)
             if not chaves:
                 print(f"Não foi possível baixar as chaves públicas do GitHub para o usuário {client_username} ou o mesmo não possui chaves.")
                 break
-
-            if verificar_assinatura(chaves, client_dh_public_key, signature, client_username):
+            if verify_signature(chaves, client_dh_public_key, signature, client_username):
                 print(f"Assinatura verificada com sucesso para o usuário {client_username}.")
             else:
                 print(f"Assinatura inválida para o usuário {client_username}.")
                 break
-
-            # Após a verificação da assinatura, é hora de gerar o par de chaves (b, B = g^b mod p) do servidor
-            b, B = generate_dh_keypair(DH_G, DH_P) # Gerando o par de chaves do servidor
-            
-            # A seguir, será feita a assinatura EdRSA da chave pública A do cliente e do seu nome de usuário.
-            private_key_bytes = load_private_key_bytes(ENV_PRIVATE_KEY) # Carrega a chave privada a partir do arquivo .env em bytes
-            signed_message = create_signed_message(B, private_key_bytes, GITHUB_USERNAME) # Cria a mensagem assinada com a chave privada Ed25519
-
+            b, B = generate_dh_keypair(DH_G, DH_P)
+            private_key_bytes = load_private_key_bytes(ENV_PRIVATE_KEY)
+            signed_message = create_signed_message(B, private_key_bytes, GITHUB_USERNAME, salt)
             conn.sendall(signed_message)
-
-            # Calculando a chave secreta compartilhada (S = A^b mod p)
-            DH_SECRET_KEY = pow(client_dh_public_key, b, DH_P) 
-            print(f"Chave secreta compartilhada calculada com sucesso: {DH_SECRET_KEY}")
-
-            # dh_handshake_data = conn.recv(2048)
+            DH_SECRET_KEY = pow(client_dh_public_key, b, DH_P)
+            key_aes, key_hmac = derive_keys_aes_hmac(DH_SECRET_KEY.to_bytes(2048, byteorder="big"), salt)
+            print(f"AES Key: {key_aes.hex()}")
+            print(f"HMAC Key: {key_hmac.hex()}")
     print(f"Conexão encerrada com {addr}")
 
-# Criando um socket TCP/IP - Servidor e conectando ao cliente
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-    server_socket.bind((HOST, PORT))
-    server_socket.listen()
-    print(f"Servidor ouvindo em {HOST}:{PORT}...")
-
-    try:
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.bind((HOST, PORT))
+        server_socket.listen()
+        server_socket.settimeout(1.0)  # Timeout de 1 segundo
+        print(f"Servidor ouvindo em {HOST}:{PORT}...")
         while True:
-            conn, addr = server_socket.accept()
-            handle_client(conn, addr)
-            print("\n---------------------------------\n")
-            print(f"Servidor ouvindo em {HOST}:{PORT}...")
-    except KeyboardInterrupt:
-        print("\nServidor encerrado manualmente.")
+            try:
+                conn, addr = server_socket.accept()
+                try:
+                    handle_client(conn, addr)
+                except Exception as e:
+                    print(f"Erro ao lidar com o cliente {addr}: {e}")
+                finally:
+                    conn.close()
+                print("\n---------------------------------\n")
+                print(f"Servidor ouvindo em {HOST}:{PORT}...")
+            except socket.timeout:
+                continue
+except KeyboardInterrupt:
+    print("\nServidor encerrado manualmente.")
