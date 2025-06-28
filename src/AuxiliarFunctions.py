@@ -30,12 +30,25 @@ def generate_dh_keypair(g, p):
     return private_key, public_key
 
 # Função para criar uma mensagem assinada com a chave privada Ed25519
-def create_signed_message(bytes_key, username, public_key):
+def create_signed_message(dh_public_key, bytes_key, username):
     private_key = sk(bytes_key) # Carrega a chave privada Ed25519 a partir dos bytes
-    message = f"{public_key}:{username}".encode("utf-8") # Cria a mensagem a ser assinada
+    message = f"{dh_public_key}:{username}".encode("utf-8") # Cria a mensagem a ser assinada
     signed = private_key.sign(message) # Assina a mensagem com a chave privada
-    signed_message = f"{public_key}:{signed.signature.hex()}:{username}".encode("utf-8") # Formata a mensagem assinada como uma string codificada em bytes
+    signed_message = f"{dh_public_key}:{signed.signature.hex()}:{username}".encode("utf-8") # Formata a mensagem assinada como uma string codificada em bytes
     return signed_message
+
+def read_signed_message(signed_message):
+    # Divide a mensagem assinada em partes
+    parts = signed_message.decode("utf-8").split(":")
+    
+    if len(parts) != 3:
+        raise ValueError("Mensagem assinada inválida. Deve conter três partes separadas por ':'.")
+
+    dh_public_key = int(parts[0])  # Chave pública Diffie-Hellman como inteiro
+    signature = bytes.fromhex(parts[1])  # Assinatura em formato hexadecimal
+    username = parts[2]  # Nome de usuário
+
+    return dh_public_key, signature, username
 
 # Função auxiliar para baixar as chaves públicas do GitHub de um usuário
 def baixar_chaves_publicas_github(username):
@@ -49,3 +62,14 @@ def baixar_chaves_publicas_github(username):
     # Divide por linhas e remove vazios
     chaves = [linha.strip() for linha in response.text.strip().split("\n") if linha.strip()]
     return chaves
+
+# Função auxiliar para verificar a assinatura usando as chaves públicas
+def verificar_assinatura(chaves, dh_public_key, signature, username):
+    for chave in chaves:
+        try:
+            public_key = serialization.load_ssh_public_key(chave.encode("utf-8"))
+            public_key.verify(signature, f"{dh_public_key}:{username}".encode("utf-8"))
+            return True
+        except Exception:
+            continue  # Se a verificação falhar, tenta com a próxima chave
+    return False
